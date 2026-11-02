@@ -1,0 +1,12 @@
+{
+  "name": "@docleus/plugin-collab",
+  "version": "0.0.1",
+  "engines": {
+    "docleus": "^0.0.1"
+  },
+  "entries": {
+    "shared": "./dist/shared/index.js",
+    "server": "./dist/server/index.js",
+    "editor": "./dist/editor/index.js"
+  }
+}

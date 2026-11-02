@@ -1,0 +1,8 @@
+- id: editor
+  plugin: ../../../docleus-plugin-editor
+- id: commonmark
+  plugin: ../../../docleus-plugin-blocks-commonmark
+- id: change-requests
+  plugin: ../../../docleus-plugin-change-requests
+- id: collab
+  plugin: ../..
