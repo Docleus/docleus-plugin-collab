@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" /></a>
-  <img alt="Public preview in preparation" src="https://img.shields.io/badge/preview-0.0.1-cfcfcf?style=flat-square" />
+  <img alt="Public preview in preparation" src="https://img.shields.io/badge/preview-0.0.2-cfcfcf?style=flat-square" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square" />
   <a href="https://docleus.io"><img alt="Online documentation" src="https://img.shields.io/badge/docs-docleus.io-111111?style=flat-square" /></a>
 </p>
@@ -59,6 +59,8 @@ The server entry needs the `storage`, `content`, `http`, `authz`, `installations
 ## Access
 
 Connections go to the WebSocket at `/api/collab` (through `ctx.http.upgrade`) with the session cookie. A connection to a page is allowed when the user has `write` on the space, the plugin is enabled for it, the page exists at the branch, and `ctx.content.checkCommit` accepts a commit by the user to that branch (so `docleus-plugin-change-requests` keeps `main` read-only where its workflow says so). Refusals carry one of `collab/forbidden`, `collab/not-enabled`, `collab/space-not-found`, `collab/branch-not-found`, `collab/page-not-found`, `collab/invalid-document`, `collab/no-schema`, or the code of the rejected commit check.
+
+The server repeats these checks before processing each message, including updates, presence and saves, and closes a refused document connection before applying its message. It also checks the snapshot's author before committing a revision. Already accepted edits remain in Yjs storage when a snapshot is refused.
 
 `GET /api/orgs/:orgId/spaces/:spaceId/pages/:pageId/collab?branch=<name>` answers `{ canShare: true, user: { name, color } }` or `{ canShare: false, reason }` with the same checks; the editor asks it before connecting.
 
