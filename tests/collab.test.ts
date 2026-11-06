@@ -215,7 +215,7 @@ describe("access", () => {
     const f = await setUp();
     const entryId = await f.createPage(["Hello"]);
     const alice = await f.connect(f.alice, target(f, entryId));
-    const bob = await f.connect(f.bob, target(f, entryId));
+    let bob = await f.connect(f.bob, target(f, entryId));
     await Promise.all([alice.ready, bob.ready]);
     await alice.save();
     const { ctx } = f.server.instance;
@@ -224,6 +224,12 @@ describe("access", () => {
       orgId: f.orgId,
       spaceId: f.spaceId,
     } as const;
+    const closed = new Promise<{ type: "closed"; reason: string }>(
+      (resolve) => {
+        alice.provider.configuration.onClose = ({ event }) =>
+          resolve({ type: "closed", reason: event.reason });
+      },
+    );
     if (change === "grant revocation") {
       await ctx.authz.revoke(f.alice.id, scope);
     } else if (change === "editor demotion") {
@@ -235,7 +241,14 @@ describe("access", () => {
       }>;
       await db.deleteFrom("users").where("id", "=", f.alice.id).execute();
     } else if (change === "plugin disablement") {
+      const bobClosed = new Promise<string>((resolve) => {
+        bob.provider.configuration.onClose = ({ event }) =>
+          resolve(event.reason);
+      });
       await ctx.installations.setEnabled(PLUGIN_NAME, scope, false);
+      bob.provider.setAwarenessField("user", { name: "Bob" });
+      bob.provider.flushPendingUpdates();
+      expect(await bobClosed).toBe("collab/not-enabled");
     } else {
       ctx.on(
         "content/pre-commit",
@@ -248,12 +261,6 @@ describe("access", () => {
       );
     }
 
-    const closed = new Promise<{ type: "closed"; reason: string }>(
-      (resolve) => {
-        alice.provider.configuration.onClose = ({ event }) =>
-          resolve({ type: "closed", reason: event.reason });
-      },
-    );
     alice.append("Unauthorized");
     alice.provider.flushPendingUpdates();
     const response = await Promise.race([closed, alice.save()]);
@@ -262,6 +269,9 @@ describe("access", () => {
 
     if (change === "plugin disablement") {
       await ctx.installations.setEnabled(PLUGIN_NAME, scope, true);
+      bob.dispose();
+      bob = await f.connect(f.bob, target(f, entryId));
+      await bob.ready;
     }
     bob.append("Still authorized");
     await settled(bob);
