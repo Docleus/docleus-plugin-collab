@@ -1,4 +1,5 @@
 import { DocleusError, MAIN_BRANCH, type PreCommitInput } from "@docleus/sdk";
+import type { Kysely } from "kysely";
 import { describe, expect, it } from "vitest";
 import { PLUGIN_NAME, collabStatusPath } from "../src/shared/index.ts";
 import {
@@ -204,6 +205,147 @@ describe("shared editing", () => {
 });
 
 describe("access", () => {
+  it.each([
+    ["grant revocation", "collab/forbidden"],
+    ["editor demotion", "collab/forbidden"],
+    ["user removal", "collab/forbidden"],
+    ["plugin disablement", "collab/not-enabled"],
+    ["branch policy change", "test/commit-rejected"],
+  ] as const)("rechecks connected clients after %s", async (change, reason) => {
+    const f = await setUp();
+    const entryId = await f.createPage(["Hello"]);
+    const alice = await f.connect(f.alice, target(f, entryId));
+    let bob = await f.connect(f.bob, target(f, entryId));
+    await Promise.all([alice.ready, bob.ready]);
+    await alice.save();
+    const { ctx } = f.server.instance;
+    const scope = {
+      kind: "space",
+      orgId: f.orgId,
+      spaceId: f.spaceId,
+    } as const;
+    const closed = new Promise<{ type: "closed"; reason: string }>(
+      (resolve) => {
+        alice.provider.configuration.onClose = ({ event }) =>
+          resolve({ type: "closed", reason: event.reason });
+      },
+    );
+    if (change === "grant revocation") {
+      await ctx.authz.revoke(f.alice.id, scope);
+    } else if (change === "editor demotion") {
+      await ctx.authz.grant(f.alice.id, scope, "viewer");
+    } else if (change === "user removal") {
+      await ctx.identity.logoutAll(f.alice.id);
+      const db = ctx.storage.db as unknown as Kysely<{
+        users: { id: string };
+      }>;
+      await db.deleteFrom("users").where("id", "=", f.alice.id).execute();
+    } else if (change === "plugin disablement") {
+      const bobClosed = new Promise<string>((resolve) => {
+        bob.provider.configuration.onClose = ({ event }) =>
+          resolve(event.reason);
+      });
+      await ctx.installations.setEnabled(PLUGIN_NAME, scope, false);
+      bob.provider.setAwarenessField("user", { name: "Bob" });
+      bob.provider.flushPendingUpdates();
+      expect(await bobClosed).toBe("collab/not-enabled");
+    } else {
+      ctx.on(
+        "content/pre-commit",
+        async (input: PreCommitInput, next: () => Promise<PreCommitInput>) => {
+          if (input.commit.author === f.alice.id) {
+            throw new DocleusError("test/commit-rejected", "use a branch");
+          }
+          return next();
+        },
+      );
+    }
+
+    alice.append("Unauthorized");
+    alice.provider.flushPendingUpdates();
+    const response = await Promise.race([closed, alice.save()]);
+    expect(bob.texts()).toEqual(["Hello"]);
+    expect(response).toEqual({ type: "closed", reason });
+
+    if (change === "plugin disablement") {
+      await ctx.installations.setEnabled(PLUGIN_NAME, scope, true);
+      bob.dispose();
+      bob = await f.connect(f.bob, target(f, entryId));
+      await bob.ready;
+    }
+    bob.append("Still authorized");
+    await settled(bob);
+    expect(await bob.save()).toMatchObject({ type: "saved" });
+    expect(textsOf(await f.body(entryId))).toEqual([
+      "Hello",
+      "Still authorized",
+    ]);
+  });
+
+  it("refuses a save from a revoked connection without a new update", async () => {
+    const f = await setUp();
+    const entryId = await f.createPage(["Hello"]);
+    const alice = await f.connect(f.alice, target(f, entryId));
+    await alice.ready;
+    await alice.save();
+    await f.server.instance.ctx.authz.revoke(f.alice.id, {
+      kind: "space",
+      orgId: f.orgId,
+      spaceId: f.spaceId,
+    });
+    const closed = new Promise<{ type: "closed"; reason: string }>(
+      (resolve) => {
+        alice.provider.configuration.onClose = ({ event }) =>
+          resolve({ type: "closed", reason: event.reason });
+      },
+    );
+    expect(await Promise.race([closed, alice.save()])).toEqual({
+      type: "closed",
+      reason: "collab/forbidden",
+    });
+    expect(textsOf(await f.body(entryId))).toEqual(["Hello"]);
+  });
+
+  it.each(["grant revocation", "plugin disablement"] as const)(
+    "rechecks a pending snapshot after %s without losing accepted edits",
+    async (change) => {
+      const f = await setUp();
+      const entryId = await f.createPage(["Hello"]);
+      const alice = await f.connect(f.alice, target(f, entryId));
+      const bob = await f.connect(f.bob, target(f, entryId));
+      await Promise.all([alice.ready, bob.ready]);
+      alice.append("Accepted before access changed");
+      await settled(alice);
+      const { ctx } = f.server.instance;
+      const scope = {
+        kind: "space",
+        orgId: f.orgId,
+        spaceId: f.spaceId,
+      } as const;
+      const flushScope = await ctx.installations.scope(scope);
+      if (change === "grant revocation") {
+        await ctx.authz.revoke(f.alice.id, scope);
+        expect(await bob.save()).toMatchObject({ type: "save-failed" });
+      } else {
+        await ctx.installations.setEnabled(PLUGIN_NAME, scope, false);
+      }
+      await ctx.parallel(flushScope, "content/flush", {
+        spaceId: f.spaceId,
+        branch: MAIN_BRANCH,
+      });
+      expect(textsOf(await f.body(entryId))).toEqual(["Hello"]);
+
+      await ctx.authz.grant(f.alice.id, scope, "editor");
+      await ctx.installations.setEnabled(PLUGIN_NAME, scope, true);
+      expect(await bob.save()).toMatchObject({ type: "saved" });
+      expect(textsOf(await f.body(entryId))).toEqual([
+        "Hello",
+        "Accepted before access changed",
+      ]);
+      expect((await headOf(f))?.author).toBe(f.alice.id);
+    },
+  );
+
   it("answers whether a page can be shared", async () => {
     const f = await setUp();
     const entryId = await f.createPage(["Hello"]);

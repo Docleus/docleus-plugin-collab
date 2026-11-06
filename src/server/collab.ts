@@ -177,6 +177,14 @@ export function registerCollab(
       if (context.schema) state.schema = context.schema;
       if (context.userId !== undefined) state.lastUser = context.userId;
     },
+    async beforeHandleMessage({ documentName, context }) {
+      const state = states.get(documentName);
+      if (!state || context.userId === undefined) {
+        throw denied("collab/forbidden");
+      }
+      const access = await authorizeCollab(ctx, context.userId, state.target);
+      if (!access.isAllowed) throw denied(access.reason);
+    },
     async onChange({ documentName, transactionOrigin, context }) {
       const state = states.get(documentName);
       const isFromClient =
@@ -366,6 +374,8 @@ export function registerCollab(
     await persist(name, document);
     const author = state.lastEditor ?? state.lastUser;
     try {
+      const access = await authorizeCollab(ctx, author, state.target);
+      if (!access.isAllowed) throw denied(access.reason);
       const revision = await ctx.content.commit({
         spaceId,
         branch,

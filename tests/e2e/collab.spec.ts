@@ -63,14 +63,9 @@ function paragraph(page: Page, text: string): Locator {
   return editorBody(page).locator("p").filter({ hasText: text });
 }
 
-async function typeAtEndOf(
-  page: Page,
-  existing: string,
-  text: string,
-): Promise<void> {
+async function moveToEndOf(page: Page, existing: string): Promise<void> {
   await paragraph(page, existing).click();
   await page.keyboard.press("End");
-  await page.keyboard.type(text);
 }
 
 function caretOf(page: Page, name: string): Locator {
@@ -83,6 +78,10 @@ test("two browsers edit one page together and see each other's carets", async ({
   browser,
 }) => {
   const { space, pageId, alice, bob } = await openTogether(browser);
+  for (const page of [alice, bob]) {
+    const session = await page.context().newCDPSession(page);
+    await session.send("Emulation.setCPUThrottlingRate", { rate: 6 });
+  }
 
   await editorBody(alice).click();
   await alice.keyboard.type("First");
@@ -90,9 +89,10 @@ test("two browsers edit one page together and see each other's carets", async ({
   await alice.keyboard.type("Second");
   await expect(paragraph(bob, "Second")).toBeVisible();
 
+  await Promise.all([moveToEndOf(alice, "First"), moveToEndOf(bob, "Second")]);
   await Promise.all([
-    typeAtEndOf(alice, "First", " from Alice"),
-    typeAtEndOf(bob, "Second", " from Bob"),
+    alice.keyboard.type(" from Alice"),
+    bob.keyboard.type(" from Bob"),
   ]);
   for (const page of [alice, bob]) {
     await expect(paragraph(page, "First from Alice")).toBeVisible();
@@ -124,7 +124,8 @@ test("a server restart in the middle of editing loses nothing", async ({
   await expect(paragraph(bob, "While the server is down")).toBeVisible({
     timeout: RECONNECT_TIMEOUT_MS,
   });
-  await typeAtEndOf(bob, "While the server is down", ", and after");
+  await moveToEndOf(bob, "While the server is down");
+  await bob.keyboard.type(", and after");
   await expect(
     paragraph(alice, "While the server is down, and after"),
   ).toBeVisible({ timeout: RECONNECT_TIMEOUT_MS });
