@@ -37,6 +37,11 @@ test.afterAll(async () => {
   await server?.stop();
 });
 
+test.afterEach(async ({ browser }) => {
+  await Promise.all(browser.contexts().map((context) => context.close()));
+  expect(browser.contexts()).toHaveLength(0);
+});
+
 interface Pair {
   readonly space: SpaceInfo;
   readonly pageId: string;
