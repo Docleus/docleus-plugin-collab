@@ -32,7 +32,7 @@
     "e2e": "playwright test"
   },
   "peerDependencies": {
-    "@docleus/sdk": "^0.0.1"
+    "@docleus/sdk": ">=0.0.1 <0.0.3"
   },
   "devDependencies": {
     "@docleus/config": "link:../docleus-core/packages/config",
