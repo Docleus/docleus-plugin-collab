@@ -433,7 +433,7 @@ export function registerCollab(
     }
   });
 
-  ctx.on("content/flush", async ({ spaceId, branch }) => {
+  ctx.on("content/flush", async ({ spaceId, branch, requireCommit }) => {
     const names = [...states.values()]
       .filter(
         (state) =>
@@ -441,7 +441,9 @@ export function registerCollab(
       )
       .map((state) => state.name);
     await Promise.all(
-      names.map((name) => serialize(name, () => snapshot(name, false))),
+      names.map((name) =>
+        serialize(name, () => snapshot(name, requireCommit === true)),
+      ),
     );
   });
 

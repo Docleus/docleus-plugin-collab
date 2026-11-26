@@ -141,6 +141,57 @@ describe("shared editing", () => {
     expect(textsOf(await f.body(entryId))).toEqual(["Hello", "Flushed"]);
   });
 
+  it("rejects a strict flush when another page moves the branch head", async () => {
+    const f = await setUp();
+    const entryId = await f.createPage(["Hello"]);
+    const otherId = await f.createPage(["Other"]);
+    const alice = await f.connect(f.alice, target(f, entryId));
+    await alice.ready;
+    alice.append("Pending");
+    await settled(alice);
+    const { ctx } = f.server.instance;
+    let hasRaced = false;
+    const dispose = ctx.on(
+      "content/pre-commit",
+      async ({ commit, isDryRun }, next) => {
+        if (isDryRun || hasRaced || !commit.put?.[entryId]) return next();
+        hasRaced = true;
+        const head = await ctx.content.head(f.spaceId);
+        const other = head && (await ctx.content.getEntry(head.id, otherId));
+        if (!head || !other) throw new Error("other page missing");
+        const { id: _id, ...content } = other;
+        await ctx.content.commit({
+          spaceId: f.spaceId,
+          parent: head.id,
+          put: { [otherId]: { ...content, title: "Changed" } },
+          message: "Concurrent edit",
+        });
+        return next();
+      },
+    );
+    const scope = await ctx.installations.scope({
+      kind: "space",
+      orgId: f.orgId,
+      spaceId: f.spaceId,
+    });
+    await expect(
+      ctx.parallel(scope, "content/flush", {
+        spaceId: f.spaceId,
+        branch: MAIN_BRANCH,
+        requireCommit: true,
+      }),
+    ).rejects.toMatchObject({ errors: [{ code: "content/stale-head" }] });
+    dispose();
+    expect(textsOf(await f.body(entryId))).toEqual(["Hello"]);
+    expect(alice.texts()).toEqual(["Hello", "Pending"]);
+    await ctx.parallel(scope, "content/flush", {
+      spaceId: f.spaceId,
+      branch: MAIN_BRANCH,
+      requireCommit: true,
+    });
+    expect(textsOf(await f.body(entryId))).toEqual(["Hello", "Pending"]);
+  });
+
   it("reloads the page when someone else commits it", async () => {
     const f = await setUp();
     const entryId = await f.createPage(["Hello"]);
