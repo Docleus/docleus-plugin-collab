@@ -373,7 +373,17 @@ export function registerCollab(
     const entry = head && (await ctx.content.getEntry(head.id, entryId));
     if (!head || !entry?.body) return;
     const body = bodyOrUndefined(state, document, entry.body);
-    if (!body || sameTree(body, entry.body)) return;
+    if (!body) {
+      await persist(name, document);
+      if (isExplicit) {
+        throw new DocleusError(
+          "collab/invalid-document-body",
+          "the shared document contains a block that cannot be saved",
+        );
+      }
+      return;
+    }
+    if (sameTree(body, entry.body)) return;
     await persist(name, document);
     const author = state.lastEditor ?? state.lastUser;
     try {

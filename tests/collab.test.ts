@@ -1,6 +1,7 @@
 import { DocleusError, MAIN_BRANCH, type PreCommitInput } from "@docleus/sdk";
 import type { Kysely } from "kysely";
 import { describe, expect, it } from "vitest";
+import * as Y from "yjs";
 import { PLUGIN_NAME, collabStatusPath } from "../src/shared/index.ts";
 import {
   eventually,
@@ -94,6 +95,39 @@ describe("shared editing", () => {
     await alice.ready;
     expect(await alice.save()).toMatchObject({ type: "saved" });
     expect((await headOf(f))?.id).toBe(before?.id);
+  });
+
+  it("rejects explicit saves and strict flushes when a pending block cannot convert", async () => {
+    const f = await setUp();
+    const entryId = await f.createPage(["Hello"]);
+    const alice = await f.connect(f.alice, target(f, entryId));
+    await alice.ready;
+    alice.append("Keep this edit");
+    const malformed = new Y.XmlElement("passthroughBlock");
+    malformed.setAttribute("block", { id: 1 } as unknown as string);
+    alice.fragment.push([malformed]);
+    await settled(alice);
+    expect(await alice.save()).toMatchObject({ type: "save-failed" });
+    const { ctx } = f.server.instance;
+    const scope = await ctx.installations.scope({
+      kind: "space",
+      orgId: f.orgId,
+      spaceId: f.spaceId,
+    });
+    await expect(
+      ctx.parallel(scope, "content/flush", {
+        spaceId: f.spaceId,
+        branch: MAIN_BRANCH,
+        requireCommit: true,
+      }),
+    ).rejects.toMatchObject({
+      errors: [{ code: "collab/invalid-document-body" }],
+    });
+    expect(textsOf(await f.body(entryId))).toEqual(["Hello"]);
+    alice.fragment.delete(alice.fragment.length - 1, 1);
+    await settled(alice);
+    expect(await alice.save()).toMatchObject({ type: "saved" });
+    expect(textsOf(await f.body(entryId))).toEqual(["Hello", "Keep this edit"]);
   });
 
   it("commits after the idle delay", async () => {
