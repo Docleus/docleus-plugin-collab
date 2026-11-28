@@ -1,5 +1,11 @@
 import type { Kysely } from "kysely";
-import type { Context, EditorSchemaDescription, Migration } from "@docleus/sdk";
+import {
+  DocleusError,
+  z,
+  type Context,
+  type EditorSchemaDescription,
+  type Migration,
+} from "@docleus/sdk";
 import { parseSchemaDescription, PLUGIN_NAME } from "../shared/index.ts";
 
 interface CollabDocumentsTable {
@@ -13,6 +19,7 @@ interface CollabDocumentsTable {
   revision: string;
   /** The editor schema description the document was encoded with, JSON. */
   schema: string;
+  author: string | null;
   updated_at: number;
 }
 
@@ -43,6 +50,15 @@ export const collabMigrations: readonly Migration[] = [
         .execute();
     },
   },
+  {
+    id: "0002-document-author",
+    async up(db: Kysely<unknown>) {
+      await db.schema
+        .alterTable("collab_documents")
+        .addColumn("author", "text")
+        .execute();
+    },
+  },
 ];
 
 /** A shared document as stored. */
@@ -54,10 +70,12 @@ export interface StoredDocument {
   readonly state: Uint8Array;
   readonly revision: string;
   readonly schema: EditorSchemaDescription;
+  readonly author: string | undefined;
 }
 
 export interface CollabStore {
   get(name: string): Promise<StoredDocument | undefined>;
+  list(spaceId: string, branch: string): Promise<readonly StoredDocument[]>;
   put(document: StoredDocument): Promise<void>;
   remove(name: string): Promise<void>;
 }
@@ -70,13 +88,46 @@ function parseJson(text: string): unknown {
   }
 }
 
+const storedRow = z.object({
+  name: z.string().min(1),
+  space_id: z.string().min(1),
+  branch: z.string().min(1),
+  entry_id: z.string().min(1),
+  state: z.string().min(1),
+  revision: z.string().min(1),
+  schema: z.string(),
+  author: z.string().min(1).nullable(),
+});
+
+function readDocument(value: unknown): StoredDocument {
+  const parsed = storedRow.safeParse(value);
+  const schema =
+    parsed.success && parseSchemaDescription(parseJson(parsed.data.schema));
+  if (!parsed.success || !schema) {
+    throw new DocleusError(
+      "collab/invalid-stored-document",
+      "a stored shared document is malformed",
+    );
+  }
+  const row = parsed.data;
+  return {
+    name: row.name,
+    spaceId: row.space_id,
+    branch: row.branch,
+    entryId: row.entry_id,
+    state: Buffer.from(row.state, "base64"),
+    revision: row.revision,
+    schema,
+    author: row.author ?? undefined,
+  };
+}
+
 export function createCollabStore(
   ctx: Context,
   now: () => number,
 ): CollabStore {
   const db = ctx.storage.db as unknown as Kysely<CollabSchema>;
   const ready = ctx.storage.migrate(PLUGIN_NAME, collabMigrations);
-  const logger = ctx.logger("collab");
 
   return {
     async get(name) {
@@ -86,21 +137,18 @@ export function createCollabStore(
         .selectAll()
         .where("name", "=", name)
         .executeTakeFirst();
-      if (!row) return undefined;
-      const schema = parseSchemaDescription(parseJson(row.schema));
-      if (!schema) {
-        logger.warn("shared document %s has an invalid schema; dropped", name);
-        return undefined;
-      }
-      return {
-        name: row.name,
-        spaceId: row.space_id,
-        branch: row.branch,
-        entryId: row.entry_id,
-        state: Buffer.from(row.state, "base64"),
-        revision: row.revision,
-        schema,
-      };
+      return row && readDocument(row);
+    },
+    async list(spaceId, branch) {
+      await ready;
+      const rows = await db
+        .selectFrom("collab_documents")
+        .selectAll()
+        .where("space_id", "=", spaceId)
+        .where("branch", "=", branch)
+        .orderBy("name")
+        .execute();
+      return rows.map(readDocument);
     },
     async put(document) {
       await ready;
@@ -108,6 +156,7 @@ export function createCollabStore(
         state: Buffer.from(document.state).toString("base64"),
         revision: document.revision,
         schema: JSON.stringify(document.schema),
+        author: document.author ?? null,
         updated_at: now(),
       };
       await db

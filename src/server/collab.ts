@@ -28,7 +28,7 @@ import {
 import { authorizeCollab, contentOf, editMessage } from "./auth.ts";
 import { bodyOfFragment, seedFragment } from "./body.ts";
 import { sameTree } from "./reuse.ts";
-import type { CollabStore } from "./store.ts";
+import type { CollabStore, StoredDocument } from "./store.ts";
 
 export interface CollabOptions {
   /** How long a document stays untouched before it is committed, in ms. */
@@ -236,6 +236,7 @@ export function registerCollab(
       state: Y.encodeStateAsUpdate(doc),
       revision: state.revision,
       schema: state.schema,
+      author: state.lastEditor ?? state.lastUser,
     });
   }
 
@@ -260,7 +261,7 @@ export function registerCollab(
       target,
       revision: head.id,
       schema,
-      lastEditor: undefined,
+      lastEditor: stored?.author,
       lastUser: context.userId,
       idleTimer: undefined,
     };
@@ -435,18 +436,67 @@ export function registerCollab(
     }
   });
 
+  async function flushStored(
+    stored: StoredDocument,
+    isExplicit: boolean,
+  ): Promise<void> {
+    if (!stored.author) {
+      const document = new Y.Doc();
+      try {
+        Y.applyUpdate(document, stored.state, SERVER_ORIGIN);
+        const entry = await ctx.content.getEntry(
+          stored.revision,
+          stored.entryId,
+        );
+        if (
+          !entry?.body ||
+          !sameTree(
+            bodyOfFragment(fragmentOf(document), stored.schema, entry.body),
+            entry.body,
+          )
+        ) {
+          throw new DocleusError(
+            "collab/author-required",
+            "reopen the shared page to recover its pending edits before continuing",
+          );
+        }
+      } finally {
+        document.destroy();
+      }
+      return;
+    }
+    const connection = await hocuspocus.openDirectConnection(stored.name, {
+      userId: stored.author,
+      schema: stored.schema,
+    });
+    try {
+      await serialize(stored.name, () => snapshot(stored.name, isExplicit));
+    } finally {
+      await connection.disconnect();
+    }
+  }
+
   ctx.on("content/flush", async ({ spaceId, branch, requireCommit }) => {
+    const stored = new Map(
+      (await store.list(spaceId, branch)).map((document) => [
+        document.name,
+        document,
+      ]),
+    );
     const names = [...states.values()]
       .filter(
         (state) =>
           state.target.spaceId === spaceId && state.target.branch === branch,
       )
       .map((state) => state.name);
-    await Promise.all(
-      names.map((name) =>
-        serialize(name, () => snapshot(name, requireCommit === true)),
-      ),
-    );
+    for (const name of new Set([...names, ...stored.keys()])) {
+      const persisted = stored.get(name);
+      if (!states.has(name) && persisted) {
+        await flushStored(persisted, requireCommit === true);
+      } else {
+        await serialize(name, () => snapshot(name, requireCommit === true));
+      }
+    }
   });
 
   const adapter = crossws({

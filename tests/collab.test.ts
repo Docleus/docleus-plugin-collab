@@ -296,6 +296,155 @@ describe("shared editing", () => {
     expect(await alice.save()).toMatchObject({ type: "saved" });
     expect(textsOf(await f.body(entryId))).toEqual(alice.texts());
   });
+
+  it("strictly flushes stored drafts after restart without connected editors", async () => {
+    const f = await setUp();
+    const entryId = await f.createPage(["Hello"]);
+    const otherId = await f.createPage(["Other"]);
+    const alice = await f.connect(f.alice, target(f, entryId));
+    const bob = await f.connect(f.bob, target(f, otherId));
+    await Promise.all([alice.ready, bob.ready]);
+    alice.append("Recovered Alice");
+    bob.append("Recovered Bob");
+    await Promise.all([settled(alice), settled(bob)]);
+    await f.restart(() => {
+      alice.dispose();
+      bob.dispose();
+    });
+
+    const { ctx } = f.server.instance;
+    const scope = await ctx.installations.scope({
+      kind: "space",
+      orgId: f.orgId,
+      spaceId: f.spaceId,
+    });
+    await ctx.parallel(scope, "content/flush", {
+      spaceId: f.spaceId,
+      branch: MAIN_BRANCH,
+      requireCommit: true,
+    });
+    expect(textsOf(await f.body(entryId))).toEqual([
+      "Hello",
+      "Recovered Alice",
+    ]);
+    expect(textsOf(await f.body(otherId))).toEqual(["Other", "Recovered Bob"]);
+    const head = await headOf(f);
+    expect([f.alice.id, f.bob.id]).toContain(head?.author);
+  });
+
+  it("retains a recovered draft when its author no longer has write access", async () => {
+    const f = await setUp();
+    const entryId = await f.createPage(["Hello"]);
+    const alice = await f.connect(f.alice, target(f, entryId));
+    await alice.ready;
+    alice.append("Pending");
+    await settled(alice);
+    await f.restart(() => alice.dispose());
+    const { ctx } = f.server.instance;
+    const scopeRef = {
+      kind: "space",
+      orgId: f.orgId,
+      spaceId: f.spaceId,
+    } as const;
+    await ctx.authz.grant(f.alice.id, scopeRef, "viewer");
+    const scope = await ctx.installations.scope(scopeRef);
+    await expect(
+      ctx.parallel(scope, "content/flush", {
+        spaceId: f.spaceId,
+        branch: MAIN_BRANCH,
+        requireCommit: true,
+      }),
+    ).rejects.toMatchObject({ errors: [{ code: "collab/denied" }] });
+    expect(textsOf(await f.body(entryId))).toEqual(["Hello"]);
+    await ctx.authz.grant(f.alice.id, scopeRef, "editor");
+    await ctx.parallel(scope, "content/flush", {
+      spaceId: f.spaceId,
+      branch: MAIN_BRANCH,
+      requireCommit: true,
+    });
+    expect(textsOf(await f.body(entryId))).toEqual(["Hello", "Pending"]);
+  });
+
+  it("keeps legacy pending drafts until an editor reconnects to recover them", async () => {
+    const f = await setUp();
+    const entryId = await f.createPage(["Hello"]);
+    const alice = await f.connect(f.alice, target(f, entryId));
+    await alice.ready;
+    alice.append("Legacy edit");
+    await settled(alice);
+    await f.restart(() => alice.dispose());
+    const { ctx } = f.server.instance;
+    const db = ctx.storage.db as unknown as Kysely<{
+      collab_documents: { author: string | null; entry_id: string };
+    }>;
+    await db
+      .updateTable("collab_documents")
+      .set({ author: null })
+      .where("entry_id", "=", entryId)
+      .execute();
+    const scope = await ctx.installations.scope({
+      kind: "space",
+      orgId: f.orgId,
+      spaceId: f.spaceId,
+    });
+    await expect(
+      ctx.parallel(scope, "content/flush", {
+        spaceId: f.spaceId,
+        branch: MAIN_BRANCH,
+        requireCommit: true,
+      }),
+    ).rejects.toMatchObject({ errors: [{ code: "collab/author-required" }] });
+    const bob = await f.connect(f.bob, target(f, entryId));
+    await bob.ready;
+    expect(bob.texts()).toEqual(["Hello", "Legacy edit"]);
+    expect(await bob.save()).toMatchObject({ type: "saved" });
+    expect((await headOf(f))?.author).toBe(f.bob.id);
+  });
+
+  it("rejects malformed stored schemas without replacing the saved state", async () => {
+    const f = await setUp();
+    const entryId = await f.createPage(["Hello"]);
+    const alice = await f.connect(f.alice, target(f, entryId));
+    await alice.ready;
+    alice.append("Pending");
+    await settled(alice);
+    await f.restart(() => alice.dispose());
+    const { ctx } = f.server.instance;
+    const db = ctx.storage.db as unknown as Kysely<{
+      collab_documents: { entry_id: string; schema: string; state: string };
+    }>;
+    const before = await db
+      .selectFrom("collab_documents")
+      .select("state")
+      .where("entry_id", "=", entryId)
+      .executeTakeFirstOrThrow();
+    await db
+      .updateTable("collab_documents")
+      .set({ schema: "invalid" })
+      .where("entry_id", "=", entryId)
+      .execute();
+    const scope = await ctx.installations.scope({
+      kind: "space",
+      orgId: f.orgId,
+      spaceId: f.spaceId,
+    });
+    await expect(
+      ctx.parallel(scope, "content/flush", {
+        spaceId: f.spaceId,
+        branch: MAIN_BRANCH,
+        requireCommit: true,
+      }),
+    ).rejects.toMatchObject({
+      errors: [{ code: "collab/invalid-stored-document" }],
+    });
+    expect(
+      await db
+        .selectFrom("collab_documents")
+        .select("state")
+        .where("entry_id", "=", entryId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(before);
+  });
 });
 
 describe("access", () => {
