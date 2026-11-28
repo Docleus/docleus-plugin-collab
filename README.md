@@ -56,6 +56,8 @@ The server entry needs the `storage`, `content`, `http`, `authz`, `installations
 - **Foreign commits.** A commit that changes the page body resets the shared document to that body; connected editors follow. Changes to the title, position or fields preserve pending body edits.
 - **Presence.** Carets and names go through Yjs awareness. Each user gets a stable color.
 
+Explicit saves and `content/flush` requests with `requireCommit: true` reject when a pending document cannot be converted or committed. Conversion failures report `collab/invalid-document-body` and retain the encoded draft. Repair the invalid block and save again before merging or rebasing. Background snapshots keep their non-strict behavior.
+
 ## Access
 
 Connections go to the WebSocket at `/api/collab` (through `ctx.http.upgrade`) with the session cookie. A connection to a page is allowed when the user has `write` on the space, the plugin is enabled for it, the page exists at the branch, and `ctx.content.checkCommit` accepts a commit by the user to that branch (so `docleus-plugin-change-requests` keeps `main` read-only where its workflow says so). Refusals carry one of `collab/forbidden`, `collab/not-enabled`, `collab/space-not-found`, `collab/branch-not-found`, `collab/page-not-found`, `collab/invalid-document`, `collab/no-schema`, or the code of the rejected commit check.
