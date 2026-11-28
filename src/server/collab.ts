@@ -305,6 +305,8 @@ export function registerCollab(
     state.revision = head.id;
     if (synced?.entries[entryId] === head.entries[entryId]) return "current";
     const body = headEntry.body;
+    const previous = synced && (await ctx.content.getEntry(synced.id, entryId));
+    if (previous?.body && sameTree(previous.body, body)) return "current";
     const current = bodyOrUndefined(state, document, body);
     if (current && sameTree(current, body)) return "current";
     logger.info(

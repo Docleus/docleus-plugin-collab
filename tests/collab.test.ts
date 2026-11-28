@@ -229,6 +229,49 @@ describe("shared editing", () => {
     await eventually(() => expect(alice.texts()).toEqual(["Replaced"]));
   });
 
+  it.each(["title", "order", "fields"] as const)(
+    "preserves pending body edits when another user changes %s",
+    async (field) => {
+      const f = await setUp();
+      const entryId = await f.createPage(["Hello"]);
+      const alice = await f.connect(f.alice, target(f, entryId));
+      await alice.ready;
+      alice.append("Pending");
+      await settled(alice);
+
+      const { content } = f.server.instance.ctx;
+      const head = await content.head(f.spaceId);
+      const entry = head && (await content.getEntry(head.id, entryId));
+      if (!head || !entry) throw new Error("no page");
+      const { id: _id, ...original } = entry;
+      const changed = {
+        ...original,
+        ...(field === "title" && { title: "Renamed" }),
+        ...(field === "order" && { order: 2 }),
+        ...(field === "fields" && { fields: { "test.label": "Updated" } }),
+      };
+      await content.commit({
+        spaceId: f.spaceId,
+        parent: head.id,
+        put: { [entryId]: changed },
+        author: f.bob.id,
+        message: "Update page metadata",
+      });
+
+      expect(await alice.save()).toMatchObject({ type: "saved" });
+      const saved = await headOf(f);
+      expect(textsOf(await f.body(entryId))).toEqual(["Hello", "Pending"]);
+      expect(
+        saved && (await content.getEntry(saved.id, entryId)),
+      ).toMatchObject({
+        title: changed.title,
+        order: changed.order,
+        fields: changed.fields,
+      });
+      expect(alice.texts()).toEqual(["Hello", "Pending"]);
+    },
+  );
+
   it("loses nothing across a restart", async () => {
     const f = await setUp();
     const entryId = await f.createPage(["Hello"]);
